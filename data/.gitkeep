@@ -1,0 +1,3 @@
+# This directory stores:
+# - patterns.db: Pattern database (armoire à patterns)
+# - progress.db: Training progress and Elo history
