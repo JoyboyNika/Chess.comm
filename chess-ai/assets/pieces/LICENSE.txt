@@ -1,0 +1,47 @@
+Chess Piece Assets
+
+This directory should contain chess piece images in PNG format.
+The application supports Unicode character fallback if images are not available.
+
+Recommended Sets (Free/Open Source):
+=====================================
+
+1. cburnett (Lichess default)
+   - Author: Colin M.L. Burnett
+   - License: GPL
+   - Source: https://github.com/lichess-org/lila/tree/master/public/piece/cburnett
+
+2. Wikimedia Commons
+   - License: Public Domain / CC0
+   - Source: https://commons.wikimedia.org/wiki/Category:SVG_chess_pieces
+
+3. JohnPablok's Improved Pieces
+   - Author: JohnPablok
+   - License: CC-BY-SA
+   - Source: https://opengameart.org/content/chess-pieces-and-board-squares
+
+Required Files:
+===============
+w_king.png    - White King
+w_queen.png   - White Queen
+w_rook.png    - White Rook
+w_bishop.png  - White Bishop
+w_knight.png  - White Knight
+w_pawn.png    - White Pawn
+b_king.png    - Black King
+b_queen.png   - Black Queen
+b_rook.png    - Black Rook
+b_bishop.png  - Black Bishop
+b_knight.png  - Black Knight
+b_pawn.png    - Black Pawn
+
+Specifications:
+===============
+- Format: PNG with alpha transparency
+- Size: 60-128 pixels (square)
+- Background: Transparent
+
+To Download:
+============
+Run: python download_assets.py
+(Requires: pip install cairosvg)
