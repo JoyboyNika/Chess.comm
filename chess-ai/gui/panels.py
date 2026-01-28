@@ -6,11 +6,19 @@ Features:
 - Game statistics
 - Control buttons
 - Speed slider
+- Stockfish review display
 """
 
 import pygame
+import sys
+import os
 from typing import Callable, Optional, Dict, Any
 from enum import Enum, auto
+
+# Add parent dir for imports
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from review import GameReview, MoveClassification
 
 
 # Colors
@@ -25,6 +33,14 @@ BUTTON_TEXT = (220, 220, 220)
 SLIDER_BG = (60, 60, 60)
 SLIDER_FILL = (100, 140, 100)
 SLIDER_HANDLE = (180, 180, 180)
+
+# Review colors
+REVIEW_EXCELLENT = (100, 200, 100)  # Green
+REVIEW_GOOD = (150, 200, 150)  # Light green
+REVIEW_NEUTRAL = (180, 180, 180)  # Gray
+REVIEW_INACCURACY = (220, 180, 100)  # Yellow
+REVIEW_MISTAKE = (220, 140, 100)  # Orange
+REVIEW_BLUNDER = (220, 80, 80)  # Red
 
 
 class GameMode(Enum):
@@ -197,6 +213,11 @@ class StatsPanel:
         # AI learning option
         self.ai_learns = True
 
+        # Stockfish review
+        self.review: Optional[GameReview] = None
+        self.show_review = False
+        self.stockfish_available = False
+
         # Callbacks
         self.on_new_game: Optional[Callable] = None
         self.on_mode_change: Optional[Callable[[GameMode], None]] = None
@@ -352,6 +373,20 @@ class StatsPanel:
         """Set current turn indicator."""
         self.turn_white = white_turn
 
+    def set_review(self, review: Optional[GameReview]):
+        """Set the game review to display."""
+        self.review = review
+        self.show_review = review is not None
+
+    def clear_review(self):
+        """Clear the current review."""
+        self.review = None
+        self.show_review = False
+
+    def set_stockfish_available(self, available: bool):
+        """Set whether Stockfish is available."""
+        self.stockfish_available = available
+
     def handle_event(self, event: pygame.event.Event):
         """Handle pygame event."""
         for button in self.buttons.values():
@@ -413,6 +448,21 @@ class StatsPanel:
         for slider in self.sliders.values():
             slider.render(surface)
 
+        # Stockfish status
+        sf_y = y + 500
+        if self.stockfish_available:
+            sf_text = "Stockfish: Active"
+            sf_color = REVIEW_GOOD
+        else:
+            sf_text = "Stockfish: Not found"
+            sf_color = TEXT_MUTED
+        sf_surface = self.font_small.render(sf_text, True, sf_color)
+        surface.blit(sf_surface, (x + pad, sf_y))
+
+        # Render review if available
+        if self.show_review and self.review:
+            self._render_review(surface, x + pad, sf_y + 25, w - 2 * pad)
+
         # Keyboard hints
         hints_y = y + self.height - 80
         hints = [
@@ -424,6 +474,38 @@ class StatsPanel:
         for i, hint in enumerate(hints):
             hint_surface = self.font_small.render(hint, True, TEXT_MUTED)
             surface.blit(hint_surface, (x + pad, hints_y + i * 18))
+
+    def _render_review(self, surface: pygame.Surface, x: int, y: int, width: int):
+        """Render the Stockfish review summary."""
+        if not self.review:
+            return
+
+        # Review title
+        title = self.font_small.render("Review:", True, TEXT_COLOR)
+        surface.blit(title, (x, y))
+        y += 20
+
+        # Stats with colors
+        stats = [
+            (f"Excellents: {self.review.excellent_count}", REVIEW_EXCELLENT),
+            (f"Bons: {self.review.good_count}", REVIEW_GOOD),
+            (f"Imprecisions: {self.review.inaccuracy_count}", REVIEW_INACCURACY),
+            (f"Erreurs: {self.review.mistake_count}", REVIEW_MISTAKE),
+            (f"Gaffes: {self.review.blunder_count}", REVIEW_BLUNDER),
+        ]
+
+        for text, color in stats:
+            text_surface = self.font_small.render(text, True, color)
+            surface.blit(text_surface, (x, y))
+            y += 16
+
+        # Worst move
+        worst = self.review.get_worst_move()
+        if worst and worst.delta < -100:
+            y += 4
+            worst_text = f"Pire: #{worst.move_number}"
+            worst_surface = self.font_small.render(worst_text, True, REVIEW_BLUNDER)
+            surface.blit(worst_surface, (x, y))
 
 
 if __name__ == '__main__':

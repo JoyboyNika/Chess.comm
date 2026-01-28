@@ -288,6 +288,63 @@ class ChessAgent:
 
         return loss.item()
 
+    def learn_from_rewards(self, rewards: List[float]) -> float:
+        """
+        Update the policy using per-move rewards from Stockfish analysis.
+
+        This is the improved learning method that uses Stockfish evaluation
+        to provide a reward signal for each individual move.
+
+        Args:
+            rewards: List of rewards, one per move played.
+                     Positive = good move, negative = bad move.
+                     Scale: [-1.0, 1.0]
+
+        Returns:
+            Total loss value
+        """
+        if len(self.memory) == 0:
+            return 0.0
+
+        if len(rewards) != len(self.memory):
+            raise ValueError(
+                f"Rewards length ({len(rewards)}) != memory length ({len(self.memory)})"
+            )
+
+        self.model.train()
+
+        # Convert rewards to tensor
+        returns = torch.tensor(rewards, device=self.device, dtype=torch.float32)
+
+        # Normalize returns (helps with training stability)
+        if returns.std() > 0:
+            returns = (returns - returns.mean()) / (returns.std() + 1e-8)
+
+        # Calculate policy loss: -log(π(a|s)) * reward
+        policy_loss = []
+        for log_prob, R in zip(self.memory.log_probs, returns):
+            policy_loss.append(-log_prob * R)
+
+        if len(policy_loss) == 0:
+            self.memory.clear()
+            return 0.0
+
+        # Backpropagation
+        self.optimizer.zero_grad()
+        loss = torch.stack(policy_loss).sum()
+        loss.backward()
+
+        # Gradient clipping for stability
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+
+        self.optimizer.step()
+
+        # Clear memory
+        self.memory.clear()
+        self.total_updates += 1
+
+        return loss.item()
+
     def clear_memory(self):
         """Clear episode memory without learning."""
         self.memory.clear()

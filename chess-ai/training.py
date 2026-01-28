@@ -5,15 +5,18 @@ Handles:
 - Self-play game generation
 - Training loop with progress tracking
 - Batch training without GUI
+- Stockfish review integration for per-move rewards
 """
 
 import chess
-from typing import Tuple, Callable, Optional
+from typing import Tuple, Callable, Optional, List
 from dataclasses import dataclass
 
 from agent import ChessAgent
 from storage import Storage, get_storage
 from utils import result_to_reward
+from engine import StockfishEngine, is_stockfish_available, get_engine
+from review import GameReview, analyze_game, compute_rewards
 
 
 @dataclass
@@ -117,7 +120,9 @@ def train_game(
     storage: Optional[Storage] = None,
     temperature: float = 1.0,
     save_game: bool = True,
-) -> Tuple[str, float]:
+    use_stockfish: bool = False,
+    engine: Optional[StockfishEngine] = None,
+) -> Tuple[str, float, Optional[GameReview]]:
     """
     Play one self-play game and learn from it.
 
@@ -126,9 +131,11 @@ def train_game(
         storage: Storage for saving game (optional)
         temperature: Sampling temperature
         save_game: Whether to save game to database
+        use_stockfish: Whether to use Stockfish review for per-move rewards
+        engine: Stockfish engine (uses global if None and use_stockfish=True)
 
     Returns:
-        Tuple of (result, loss)
+        Tuple of (result, loss, review or None)
     """
     # Play game
     game_result = play_game(
@@ -137,11 +144,30 @@ def train_game(
         store_for_learning=True,
     )
 
-    # Calculate reward (from white's perspective)
-    reward = result_to_reward(game_result.result, chess.WHITE)
+    review = None
 
-    # Learn from game
-    loss = agent.learn(reward)
+    if use_stockfish:
+        # Analyze game with Stockfish and learn from per-move rewards
+        try:
+            if engine is None:
+                engine = get_engine()
+
+            moves = list(game_result.board.move_stack)
+            review = analyze_game(moves, engine)
+            rewards = compute_rewards(review.moves)
+
+            # Learn from per-move rewards
+            loss = agent.learn_from_rewards(rewards)
+        except Exception as e:
+            # Fallback to simple reward if Stockfish fails
+            print(f"Stockfish analysis failed: {e}, using simple reward")
+            reward = result_to_reward(game_result.result, chess.WHITE)
+            loss = agent.learn(reward)
+    else:
+        # Use simple end-of-game reward
+        reward = result_to_reward(game_result.result, chess.WHITE)
+        loss = agent.learn(reward)
+
     agent.total_games += 1
 
     # Save to database
@@ -152,7 +178,50 @@ def train_game(
             board=game_result.board,
         )
 
-    return game_result.result, loss
+    return game_result.result, loss, review
+
+
+def train_game_with_review(
+    agent: ChessAgent,
+    storage: Optional[Storage] = None,
+    temperature: float = 1.0,
+    save_game: bool = True,
+    engine: Optional[StockfishEngine] = None,
+) -> Tuple[str, float, GameReview]:
+    """
+    Play one self-play game with Stockfish review.
+
+    Convenience function that always uses Stockfish analysis.
+
+    Args:
+        agent: Chess agent
+        storage: Storage for saving game (optional)
+        temperature: Sampling temperature
+        save_game: Whether to save game to database
+        engine: Stockfish engine (uses global if None)
+
+    Returns:
+        Tuple of (result, loss, review)
+
+    Raises:
+        RuntimeError: If Stockfish is not available
+    """
+    if not is_stockfish_available():
+        raise RuntimeError(
+            "Stockfish not found. Install with: brew install stockfish (macOS) "
+            "or sudo apt install stockfish (Linux)"
+        )
+
+    result, loss, review = train_game(
+        agent,
+        storage=storage,
+        temperature=temperature,
+        save_game=save_game,
+        use_stockfish=True,
+        engine=engine,
+    )
+
+    return result, loss, review
 
 
 def train_batch(
@@ -162,6 +231,7 @@ def train_batch(
     progress_callback: Optional[Callable[[int, int, TrainingStats], None]] = None,
     save_interval: int = 100,
     temperature: float = 1.0,
+    use_stockfish: bool = True,
 ) -> TrainingStats:
     """
     Train for multiple games without GUI.
@@ -173,6 +243,7 @@ def train_batch(
         progress_callback: Called with (current, total, stats) after each game
         save_interval: Save model every N games
         temperature: Sampling temperature
+        use_stockfish: Whether to use Stockfish review (default: True)
 
     Returns:
         Training statistics
@@ -182,18 +253,34 @@ def train_batch(
 
     stats = TrainingStats()
 
+    # Initialize Stockfish engine if needed
+    engine = None
+    if use_stockfish:
+        if is_stockfish_available():
+            try:
+                engine = get_engine()
+                print("Using Stockfish for per-move reward analysis")
+            except Exception as e:
+                print(f"Failed to initialize Stockfish: {e}")
+                print("Falling back to simple reward")
+                use_stockfish = False
+        else:
+            print("Stockfish not found, using simple reward")
+            use_stockfish = False
+
     for i in range(num_games):
         # Play and learn
-        result, loss = train_game(
+        result, loss, review = train_game(
             agent,
             storage=storage,
             temperature=temperature,
             save_game=True,
+            use_stockfish=use_stockfish,
+            engine=engine,
         )
 
-        # Update stats
-        game_result = play_game(agent, store_for_learning=False)
-        stats.update(result, len(game_result.board.move_stack))
+        # Update stats with actual game played
+        stats.update(result, len(agent.memory) if hasattr(agent, 'memory') else 0)
 
         # Progress callback
         if progress_callback:
@@ -237,28 +324,49 @@ class Trainer:
     High-level trainer class for managing training sessions.
 
     Useful for GUI integration where training needs to be pausable.
+    Supports both simple reward and Stockfish review modes.
     """
 
-    def __init__(self, agent: ChessAgent, storage: Optional[Storage] = None):
+    def __init__(
+        self,
+        agent: ChessAgent,
+        storage: Optional[Storage] = None,
+        use_stockfish: bool = True,
+    ):
         """
         Initialize trainer.
 
         Args:
             agent: Chess agent to train
             storage: Storage for saving
+            use_stockfish: Whether to use Stockfish for per-move rewards
         """
         self.agent = agent
         self.storage = storage or get_storage()
         self.stats = TrainingStats()
         self.is_training = False
         self.should_stop = False
+        self.use_stockfish = use_stockfish
+        self.engine: Optional[StockfishEngine] = None
+        self.last_review: Optional[GameReview] = None
 
-    def train_one_game(self, temperature: float = 1.0) -> Tuple[str, float, int]:
+        # Try to initialize Stockfish
+        if use_stockfish and is_stockfish_available():
+            try:
+                self.engine = get_engine()
+            except Exception as e:
+                print(f"Failed to initialize Stockfish: {e}")
+                self.use_stockfish = False
+
+    def train_one_game(
+        self,
+        temperature: float = 1.0,
+    ) -> Tuple[str, float, int, Optional[GameReview]]:
         """
         Train for one game.
 
         Returns:
-            Tuple of (result, loss, move_count)
+            Tuple of (result, loss, move_count, review or None)
         """
         game_result = play_game(
             self.agent,
@@ -266,8 +374,23 @@ class Trainer:
             store_for_learning=True,
         )
 
-        reward = result_to_reward(game_result.result, chess.WHITE)
-        loss = self.agent.learn(reward)
+        review = None
+
+        if self.use_stockfish and self.engine is not None:
+            try:
+                moves = list(game_result.board.move_stack)
+                review = analyze_game(moves, self.engine)
+                rewards = compute_rewards(review.moves)
+                loss = self.agent.learn_from_rewards(rewards)
+                self.last_review = review
+            except Exception as e:
+                print(f"Stockfish analysis failed: {e}")
+                reward = result_to_reward(game_result.result, chess.WHITE)
+                loss = self.agent.learn(reward)
+        else:
+            reward = result_to_reward(game_result.result, chess.WHITE)
+            loss = self.agent.learn(reward)
+
         self.agent.total_games += 1
 
         self.storage.save_game(
@@ -278,7 +401,11 @@ class Trainer:
 
         self.stats.update(game_result.result, game_result.moves)
 
-        return game_result.result, loss, game_result.moves
+        return game_result.result, loss, game_result.moves, review
+
+    def get_last_review(self) -> Optional[GameReview]:
+        """Get the review from the last trained game."""
+        return self.last_review
 
     def save(self):
         """Save current model."""
@@ -287,6 +414,19 @@ class Trainer:
     def reset_stats(self):
         """Reset session statistics."""
         self.stats = TrainingStats()
+        self.last_review = None
+
+    def set_stockfish_enabled(self, enabled: bool):
+        """Enable or disable Stockfish analysis."""
+        if enabled and self.engine is None:
+            if is_stockfish_available():
+                try:
+                    self.engine = get_engine()
+                    self.use_stockfish = True
+                except Exception:
+                    self.use_stockfish = False
+        else:
+            self.use_stockfish = enabled and self.engine is not None
 
 
 if __name__ == '__main__':

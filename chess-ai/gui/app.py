@@ -23,6 +23,8 @@ from agent import ChessAgent
 from storage import Storage, get_storage
 from training import play_game, TrainingStats
 from utils import result_to_reward
+from engine import StockfishEngine, is_stockfish_available, get_engine
+from review import analyze_game, compute_rewards, GameReview
 
 from .board import BoardRenderer
 from .panels import StatsPanel, GameMode
@@ -109,11 +111,24 @@ class ChessApp:
         # Session stats
         self.session_stats = TrainingStats()
 
+        # Stockfish engine for review
+        self.engine: Optional[StockfishEngine] = None
+        self.stockfish_available = is_stockfish_available()
+
+        if self.stockfish_available:
+            try:
+                self.engine = get_engine()
+                print("Stockfish engine initialized for post-game review")
+            except Exception as e:
+                print(f"Failed to initialize Stockfish: {e}")
+                self.stockfish_available = False
+
         # Connect panel callbacks
         self._setup_callbacks()
 
         # Update panel with initial stats
         self._update_panel_stats()
+        self.panel.set_stockfish_available(self.stockfish_available)
 
         # Running flag
         self.running = True
@@ -140,6 +155,9 @@ class ChessApp:
         self.last_move_time = time.time()
         self.ai_thinking = False
         self.agent.clear_memory()
+
+        # Clear review from previous game
+        self.panel.clear_review()
 
         # Flip board if playing as black
         if self.mode == GameMode.PLAY:
@@ -199,8 +217,25 @@ class ChessApp:
 
         # Learn if enabled
         if self.panel.ai_learns:
-            reward = result_to_reward(self.game_result, chess.WHITE)
-            self.agent.learn(reward)
+            if self.stockfish_available and self.engine is not None:
+                # Use Stockfish review for per-move rewards
+                try:
+                    moves = list(self.board.move_stack)
+                    review = analyze_game(moves, self.engine)
+                    rewards = compute_rewards(review.moves)
+                    self.agent.learn_from_rewards(rewards)
+                    self.panel.set_review(review)
+                    print(f"Game reviewed: {review.blunder_count} blunders, "
+                          f"{review.mistake_count} mistakes")
+                except Exception as e:
+                    print(f"Review failed: {e}, using simple reward")
+                    reward = result_to_reward(self.game_result, chess.WHITE)
+                    self.agent.learn(reward)
+            else:
+                # Use simple end-of-game reward
+                reward = result_to_reward(self.game_result, chess.WHITE)
+                self.agent.learn(reward)
+
             self.agent.total_games += 1
 
         self._update_panel_stats()
